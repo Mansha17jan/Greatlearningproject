@@ -1,0 +1,134 @@
+name: Tourism Project Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  register-dataset:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: pip install huggingface_hub
+
+      - name: Upload Dataset to Hugging Face Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          username = api.whoami()["name"]
+
+          repo_id = f"{username}/tourism-dataset"
+
+          api.create_repo(
+              repo_id=repo_id,
+              repo_type="dataset",
+              exist_ok=True,
+              private=False
+          )
+
+          api.upload_file(
+              path_or_fileobj="data/tourism.csv",
+              path_in_repo="tourism.csv",
+              repo_id=repo_id,
+              repo_type="dataset"
+          )
+
+          print("Dataset uploaded to", repo_id)
+          PY
+
+  data-prep:
+    needs: register-dataset
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: pip install pandas scikit-learn
+
+      - name: Run Data Preparation
+        run: python model_building/data_prep.py
+
+  model-training:
+    needs: data-prep
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: pip install pandas numpy scikit-learn joblib mlflow
+
+      - name: Run Data Preparation
+        run: python model_building/data_prep.py
+
+      - name: Model Building and MLflow Tracking
+        run: python model_building/train.py
+
+      - name: Upload Trained Model
+        uses: actions/upload-artifact@v4
+        with:
+          name: tourism-model
+          path: deployment/model.joblib
+
+  deploy-hosting:
+    needs: model-training
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: pip install huggingface_hub
+
+      - name: Download Trained Model
+        uses: actions/download-artifact@v4
+        with:
+          name: tourism-model
+          path: deployment
+
+      - name: Deploy to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          username = api.whoami()["name"]
+
+          repo_id = f"{username}/tourism-streamlit"
+
+          api.create_repo(
+              repo_id=repo_id,
+              repo_type="space",
+              space_sdk="docker",
+              exist_ok=True,
+              private=False
+          )
+
+          for filename in [
+              "app.py",
+              "requirements.txt",
+              "model.joblib",
+              "Dockerfile"
+          ]:
+              api.upload_file(
+                  path_or_fileobj=f"deployment/{filename}",
+                  path_in_repo=filename,
+                  repo_id=repo_id,
+                  repo_type="space"
+              )
+
+          print("Streamlit Space deployed to", repo_id)
+          PY
